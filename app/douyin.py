@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 
 from playwright.async_api import Locator, Page
 
 from app.selectors import CHAT_PANEL_MARKERS, MESSAGE_INPUTS, SEARCH_INPUTS
+
+LOGGER = logging.getLogger("douyin_sender")
 
 
 class PageOperationError(RuntimeError):
