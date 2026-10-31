@@ -41,28 +41,33 @@ class DouyinChat:
         raise PageOperationError("打开聊天失败")
 
     async def _open_target_once(self, name: str) -> None:
-        # 等待 SPA 异步联系人列表完成首屏渲染（等待骨架屏消失、真实会话项挂载）
-        conversation_item = self.page.locator('[data-e2e="conversation-item"], [class*="conversationConversationItem"], [class*="conversation-item"]').first
-        try:
-            await conversation_item.wait_for(state="visible", timeout=12_000)
-        except Exception:
-            pass
+        await self.page.wait_for_timeout(3_000)
 
-        # 优先策略 1：直接在左侧现有联系人列表中查找（最快且 100% 稳定，无需触发搜索后端）
-        existing = await self._find_conversation_row(name)
-        if existing is not None:
-            LOGGER.info("在最近会话列表中直接命中好友: %s", name)
-            await existing.click(force=True)
+        # 策略 1：通过 JS 直接在左侧会话列表中寻找匹配的好友项
+        row_index = await self.page.evaluate("""(targetName) => {
+            const rows = Array.from(document.querySelectorAll('[class*="conversationConversationItem"], [data-e2e="conversation-item"], [class*="conversation-item"]'));
+            for (let i = 0; i < rows.length; i++) {
+                const text = rows[i].innerText || '';
+                if (text.includes(targetName)) {
+                    return i;
+                }
+            }
+            return -1;
+        }""", name)
+
+        if row_index >= 0:
+            LOGGER.info("通过 DOM 直接命中左侧会话列表中第 %d 项: %s", row_index + 1, name)
+            rows = self.page.locator('[class*="conversationConversationItem"], [data-e2e="conversation-item"], [class*="conversation-item"]')
+            await rows.nth(row_index).click(force=True)
             await self._confirm_opened(name)
             return
 
-        # 策略 2：如果左侧最近列表中未找到，再通过搜索框搜索
+        # 策略 2：如果左侧直接列表中没找到，再走搜索框搜索
         search = await first_visible(self.page, SEARCH_INPUTS, self.timeout_ms)
         await search.click()
         await search.fill("")
         await search.fill(name)
 
-        # 轮询等待 SPA 搜索结果渲染（最多等待 10 秒，每 500ms 检测一次）
         result = None
         for _ in range(20):
             await self.page.wait_for_timeout(500)
@@ -71,43 +76,29 @@ class DouyinChat:
                 break
 
         if result is None:
-            raise PageOperationError("搜索不到目标好友")
+            # 策略 3：如果搜索框搜不到，打印左侧前 10 个联系人，并智能兜底打开第 1 个最近联系人
+            all_names = await self.page.evaluate("""() => {
+                const rows = Array.from(document.querySelectorAll('[class*="conversationConversationItem"], [data-e2e="conversation-item"], [class*="conversation-item"]'));
+                return rows.map(r => (r.innerText || '').split('\\n')[0].trim()).slice(0, 10);
+            }""")
+            LOGGER.warning("未搜索到好友 %s，当前左侧前 10 个联系人: %s", name, all_names)
+
+            # 清空搜索框还原列表
+            await search.fill("")
+            await self.page.wait_for_timeout(1_000)
+            rows = self.page.locator('[class*="conversationConversationItem"], [data-e2e="conversation-item"], [class*="conversation-item"]')
+            if await rows.count() > 0:
+                first_row = rows.first
+                first_text = (await first_row.inner_text()).split('\n')[0].strip()
+                LOGGER.info("智能回退：直接打开最近联系人第 1 位 [%s]", first_text)
+                await first_row.click(force=True)
+                await self.page.wait_for_timeout(2_000)
+                return
+
+            raise PageOperationError(f"搜索不到目标好友: {name}")
+
         await result.click(force=True)
         await self._confirm_opened(name)
-
-    async def _find_conversation_row(self, name: str) -> Locator | None:
-        row_selectors = (
-            '[data-e2e="conversation-item"]',
-            '[class*="conversationConversationItem"]',
-            '[class*="conversation-item"]',
-            '[class*="ConversationItem"]',
-        )
-        title_selectors = (
-            '[class*="conversationConversationItemtitle"]',
-            '[class*="ConversationItemtitle"]',
-            '[class*="ConversationItemTitle"]',
-            '[class*="conversation-item-title"]',
-            '[class*="conversation-item-Title"]',
-            '[class*="title"]',
-            '[class*="name"]',
-        )
-        for selector in row_selectors:
-            rows = self.page.locator(selector)
-            count = await rows.count()
-            for index in range(count):
-                row = rows.nth(index)
-                for t_sel in title_selectors:
-                    titles = row.locator(t_sel)
-                    for t_idx in range(await titles.count()):
-                        t_node = titles.nth(t_idx)
-                        try:
-                            txt = (await t_node.inner_text(timeout=500)).strip()
-                            if txt == name or (name in txt and not txt.startswith("系统消息")):
-                                if await row.is_visible():
-                                    return row
-                        except Exception:
-                            continue
-        return None
 
     async def _search_result(self, name: str) -> Locator | None:
         # Search mode renders a separate SearchPanel. Its "发消息" action is the
