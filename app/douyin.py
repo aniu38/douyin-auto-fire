@@ -41,6 +41,13 @@ class DouyinChat:
         raise PageOperationError("打开聊天失败")
 
     async def _open_target_once(self, name: str) -> None:
+        # 等待 SPA 异步联系人列表完成首屏渲染（等待骨架屏消失、真实会话项挂载）
+        conversation_item = self.page.locator('[data-e2e="conversation-item"], [class*="conversationConversationItem"], [class*="conversation-item"]').first
+        try:
+            await conversation_item.wait_for(state="visible", timeout=12_000)
+        except Exception:
+            pass
+
         # 优先策略 1：直接在左侧现有联系人列表中查找（最快且 100% 稳定，无需触发搜索后端）
         existing = await self._find_conversation_row(name)
         if existing is not None:
@@ -81,18 +88,25 @@ class DouyinChat:
             '[class*="ConversationItemTitle"]',
             '[class*="conversation-item-title"]',
             '[class*="conversation-item-Title"]',
+            '[class*="title"]',
+            '[class*="name"]',
         )
         for selector in row_selectors:
             rows = self.page.locator(selector)
-            for index in range(await rows.count()):
+            count = await rows.count()
+            for index in range(count):
                 row = rows.nth(index)
-                title_locator = await _visible_exact_text_locator(row, title_selectors, name)
-                if title_locator is not None:
-                    try:
-                        if await row.is_visible():
-                            return row
-                    except Exception:
-                        continue
+                for t_sel in title_selectors:
+                    titles = row.locator(t_sel)
+                    for t_idx in range(await titles.count()):
+                        t_node = titles.nth(t_idx)
+                        try:
+                            txt = (await t_node.inner_text(timeout=500)).strip()
+                            if txt == name or (name in txt and not txt.startswith("系统消息")):
+                                if await row.is_visible():
+                                    return row
+                        except Exception:
+                            continue
         return None
 
     async def _search_result(self, name: str) -> Locator | None:
