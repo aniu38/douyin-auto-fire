@@ -46,22 +46,23 @@ class DouyinChat:
     async def _open_target_once(self, name: str) -> None:
         await self.page.wait_for_timeout(3_000)
 
-        # 策略 1：通过 JS 直接在左侧会话列表中寻找匹配的好友项
-        row_index = await self.page.evaluate("""(targetName) => {
-            const rows = Array.from(document.querySelectorAll('[class*="conversationConversationItem"], [data-e2e="conversation-item"], [class*="conversation-item"]'));
-            for (let i = 0; i < rows.length; i++) {
-                const text = rows[i].innerText || '';
+        # 策略 1：通过 JS 直接在左侧会话列表中寻找匹配的好友项并点击（兼容 🔥278 等火花天数）
+        clicked = await self.page.evaluate("""(targetName) => {
+            const rows = Array.from(document.querySelectorAll('[data-e2e="conversation-item"]'));
+            const list = rows.length > 0 ? rows : Array.from(document.querySelectorAll('[class*="conversationConversationItem"], [class*="conversation-item"]'));
+            for (let i = 0; i < list.length; i++) {
+                const text = list[i].innerText || '';
                 if (text.includes(targetName)) {
-                    return i;
+                    list[i].scrollIntoView();
+                    list[i].click();
+                    return { found: true, index: i, name: targetName };
                 }
             }
-            return -1;
+            return { found: false, index: -1, name: targetName };
         }""", name)
 
-        if row_index >= 0:
-            LOGGER.info("通过 DOM 直接命中左侧会话列表中第 %d 项: %s", row_index + 1, name)
-            rows = self.page.locator('[class*="conversationConversationItem"], [data-e2e="conversation-item"], [class*="conversation-item"]')
-            await rows.nth(row_index).click(force=True)
+        if clicked.get("found"):
+            LOGGER.info("通过 DOM 直接命中并点击左侧好友: %s (第 %d 位)", name, clicked["index"] + 1)
             await self._confirm_opened(name)
             return
 
@@ -79,25 +80,12 @@ class DouyinChat:
                 break
 
         if result is None:
-            # 策略 3：如果搜索框搜不到，打印左侧前 10 个联系人，并智能兜底打开第 1 个最近联系人
+            # 策略 3：如果搜索框搜不到，打印左侧前 10 个联系人供排查
             all_names = await self.page.evaluate("""() => {
-                const rows = Array.from(document.querySelectorAll('[class*="conversationConversationItem"], [data-e2e="conversation-item"], [class*="conversation-item"]'));
+                const rows = Array.from(document.querySelectorAll('[data-e2e="conversation-item"], [class*="conversationConversationItem"]'));
                 return rows.map(r => (r.innerText || '').split('\\n')[0].trim()).slice(0, 10);
             }""")
             LOGGER.warning("未搜索到好友 %s，当前左侧前 10 个联系人: %s", name, all_names)
-
-            # 清空搜索框还原列表
-            await search.fill("")
-            await self.page.wait_for_timeout(1_000)
-            rows = self.page.locator('[class*="conversationConversationItem"], [data-e2e="conversation-item"], [class*="conversation-item"]')
-            if await rows.count() > 0:
-                first_row = rows.first
-                first_text = (await first_row.inner_text()).split('\n')[0].strip()
-                LOGGER.info("智能回退：直接打开最近联系人第 1 位 [%s]", first_text)
-                await first_row.click(force=True)
-                await self.page.wait_for_timeout(2_000)
-                return
-
             raise PageOperationError(f"搜索不到目标好友: {name}")
 
         await result.click(force=True)
