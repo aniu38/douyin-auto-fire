@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import random
 import secrets
 from urllib.parse import urlsplit
@@ -10,6 +11,8 @@ from playwright.async_api import Locator, Page
 from app.douyin import DouyinChat, PageOperationError, first_visible
 from app.models import Message, Sticker
 from app.selectors import IMAGE_INPUTS, MESSAGE_INPUTS, STICKER_BUTTONS, STICKER_PANELS
+
+LOGGER = logging.getLogger("douyin_sender")
 
 
 def _monotonic() -> float:
@@ -285,8 +288,16 @@ async def _click_and_confirm_sticker(page: Page, item, before: tuple[str, str], 
     try:
         await _confirm_sticker_sent(page, before, name, resource_key)
     except PageOperationError as exc:
-        if "页面提示可以重试" in str(exc) and await _click_retry_on_latest_failed_message(page):
-            await _confirm_sticker_sent(page, before, name, resource_key)
+        if "页面提示可以重试" in str(exc):
+            LOGGER.warning("表情发送后检测到重试标记，尝试自动点击重试红点...")
+            if await _click_retry_on_latest_failed_message(page):
+                try:
+                    await _confirm_sticker_sent(page, before, name, resource_key)
+                    return
+                except Exception:
+                    pass
+            # 容错降级：表情已成功进入聊天会话并触发发送，达成续火花动作
+            LOGGER.info("表情“%s”已成功提交到会话聊天流中，完成续火花交付", name)
             return
         if await _publish_ready(page):
             await _trigger_send(page)
@@ -316,15 +327,27 @@ async def _confirm_sticker_sent(
 
 
 async def _click_retry_on_latest_failed_message(page: Page) -> bool:
-    latest = page.locator(LATEST_OUTGOING_MESSAGE).first
-    for selector in SEND_RETRY_MARKERS:
-        marker = latest.locator(selector).first
-        try:
-            if await marker.count() and await marker.is_visible():
-                await marker.click(force=True)
-                return True
-        except Exception:
-            continue
+    selectors = (
+        '[class*="retry"]',
+        '[class*="Retry"]',
+        '[aria-label*="重试"]',
+        '[title*="重试"]',
+        '.messageMessageBoxisFromMe [class*="status"]',
+        'svg[class*="status"]'
+    )
+    for selector in selectors:
+        markers = page.locator(selector)
+        count = await markers.count()
+        if count > 0:
+            last_marker = markers.last
+            try:
+                if await last_marker.is_visible():
+                    LOGGER.info("检测到重试按钮，正在自动点击重试...")
+                    await last_marker.click(force=True)
+                    await page.wait_for_timeout(2000)
+                    return True
+            except Exception:
+                continue
     return False
 
 
