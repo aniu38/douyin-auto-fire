@@ -45,9 +45,15 @@ class DouyinChat:
         await search.click()
         await search.fill("")
         await search.fill(name)
-        await self.page.wait_for_timeout(1_500)
 
-        result = await self._search_result(name)
+        # 轮询等待 SPA 搜索结果渲染（最多等待 10 秒，每 500ms 检测一次）
+        result = None
+        for _ in range(20):
+            await self.page.wait_for_timeout(500)
+            result = await self._search_result(name)
+            if result is not None:
+                break
+
         if result is None:
             raise PageOperationError("搜索不到目标好友")
         await result.click(force=True)
