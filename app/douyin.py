@@ -41,6 +41,15 @@ class DouyinChat:
         raise PageOperationError("打开聊天失败")
 
     async def _open_target_once(self, name: str) -> None:
+        # 优先策略 1：直接在左侧现有联系人列表中查找（最快且 100% 稳定，无需触发搜索后端）
+        existing = await self._find_conversation_row(name)
+        if existing is not None:
+            LOGGER.info("在最近会话列表中直接命中好友: %s", name)
+            await existing.click(force=True)
+            await self._confirm_opened(name)
+            return
+
+        # 策略 2：如果左侧最近列表中未找到，再通过搜索框搜索
         search = await first_visible(self.page, SEARCH_INPUTS, self.timeout_ms)
         await search.click()
         await search.fill("")
@@ -58,6 +67,33 @@ class DouyinChat:
             raise PageOperationError("搜索不到目标好友")
         await result.click(force=True)
         await self._confirm_opened(name)
+
+    async def _find_conversation_row(self, name: str) -> Locator | None:
+        row_selectors = (
+            '[data-e2e="conversation-item"]',
+            '[class*="conversationConversationItem"]',
+            '[class*="conversation-item"]',
+            '[class*="ConversationItem"]',
+        )
+        title_selectors = (
+            '[class*="conversationConversationItemtitle"]',
+            '[class*="ConversationItemtitle"]',
+            '[class*="ConversationItemTitle"]',
+            '[class*="conversation-item-title"]',
+            '[class*="conversation-item-Title"]',
+        )
+        for selector in row_selectors:
+            rows = self.page.locator(selector)
+            for index in range(await rows.count()):
+                row = rows.nth(index)
+                title_locator = await _visible_exact_text_locator(row, title_selectors, name)
+                if title_locator is not None:
+                    try:
+                        if await row.is_visible():
+                            return row
+                    except Exception:
+                        continue
+        return None
 
     async def _search_result(self, name: str) -> Locator | None:
         # Search mode renders a separate SearchPanel. Its "发消息" action is the
