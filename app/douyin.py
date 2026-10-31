@@ -44,25 +44,53 @@ class DouyinChat:
         raise PageOperationError("打开聊天失败")
 
     async def _open_target_once(self, name: str) -> None:
-        await self.page.wait_for_timeout(3_000)
+        await self.page.wait_for_timeout(2_000)
 
-        # 策略 1：通过 JS 直接在左侧会话列表中寻找匹配的好友项并点击（兼容 🔥278 等火花天数）
-        clicked = await self.page.evaluate("""(targetName) => {
-            const rows = Array.from(document.querySelectorAll('[data-e2e="conversation-item"]'));
-            const list = rows.length > 0 ? rows : Array.from(document.querySelectorAll('[class*="conversationConversationItem"], [class*="conversation-item"]'));
-            for (let i = 0; i < list.length; i++) {
-                const text = list[i].innerText || '';
+        # 关闭可能遮挡页面的模态弹窗（如“是否保存登录信息”）
+        try:
+            modal_btn = self.page.locator('button:has-text("保存"), button:has-text("取消")').first
+            if await modal_btn.count() and await modal_btn.is_visible():
+                await modal_btn.click(timeout=1000)
+                await self.page.wait_for_timeout(500)
+        except Exception:
+            pass
+
+        # 策略 1：通过坐标与物理鼠标直接在左侧会话列表中点击命中好友
+        coord = await self.page.evaluate("""(targetName) => {
+            const rows = Array.from(document.querySelectorAll('[data-e2e="conversation-item"], [class*="conversationConversationItem"], [class*="conversation-item"]'));
+            for (let i = 0; i < rows.length; i++) {
+                const el = rows[i];
+                const text = el.innerText || '';
                 if (text.includes(targetName)) {
-                    list[i].scrollIntoView();
-                    list[i].click();
-                    return { found: true, index: i, name: targetName };
+                    el.scrollIntoView({ block: 'center' });
+                    const rect = el.getBoundingClientRect();
+                    const x = rect.left + rect.width / 2;
+                    const y = rect.top + rect.height / 2;
+                    
+                    // 派发全套鼠标与指针事件
+                    ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evtName => {
+                        el.dispatchEvent(new MouseEvent(evtName, {
+                            bubbles: true,
+                            cancelable: true,
+                            view: window,
+                            clientX: x,
+                            clientY: y
+                        }));
+                    });
+
+                    return { found: true, index: i, x: x, y: y, name: targetName };
                 }
             }
-            return { found: false, index: -1, name: targetName };
+            return { found: false, index: -1, x: 0, y: 0, name: targetName };
         }""", name)
 
-        if clicked.get("found"):
-            LOGGER.info("通过 DOM 直接命中并点击左侧好友: %s (第 %d 位)", name, clicked["index"] + 1)
+        if coord.get("found"):
+            LOGGER.info("通过物理坐标直接命中并点击左侧好友: %s (第 %d 位, 坐标: %s, %s)", name, coord["index"] + 1, coord["x"], coord["y"])
+            # Playwright 底层真实鼠标点击该物理坐标
+            try:
+                await self.page.mouse.click(coord["x"], coord["y"])
+            except Exception:
+                pass
             await self._confirm_opened(name)
             return
 
@@ -328,8 +356,15 @@ async def _has_exact_text(locators: Locator, expected: str) -> bool:
 
 async def _text_equals(locator: Locator, expected: str) -> bool:
     try:
-        return (await locator.inner_text(timeout=500)).strip() == expected
+        text = (await locator.inner_text(timeout=500)).strip()
+        if text == expected:
+            return True
+        # 兼容抖音昵称后面跟随的 🔥220 火花天数或在线状态等后缀
+        if text.startswith(expected) or expected in text:
+            return True
+        return False
     except Exception:
+        return False
         return False
 
 
