@@ -136,7 +136,15 @@ async def open_private_messages(page: Page, timeout_ms: int = 15_000) -> None:
         matched = await _first_visible_selector(page, SEARCH_INPUTS, timeout_ms)
         if matched is not None:
             LOGGER.info("检测到好友搜索框: selector=%s, 第 %d 次尝试", matched, attempt)
-            await page.wait_for_timeout(3_000)
+            try:
+                await page.wait_for_selector(
+                    '[class*="conversationConversationItem"], [data-e2e="conversation-item"], [class*="conversation-item"]',
+                    timeout=15_000,
+                )
+                LOGGER.info("私信联系人列表已渲染就绪")
+            except Exception:
+                LOGGER.warning("等待联系人列表就绪超时，继续尝试")
+            await page.wait_for_timeout(2_000)
             return
         # The search box is missing; a freshly shown login prompt may only have
         # appeared during the wait, so re-check before deciding to retry.
